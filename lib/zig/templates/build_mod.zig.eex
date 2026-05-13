@@ -44,6 +44,16 @@ pub fn build(b: *std.Build) void {
     // injection — the host's default include path is fine.
     const apple_sdkroot = b.option([]const u8, "apple_sdkroot", "Absolute path to an Apple SDK (iPhoneOS/iPhoneSimulator/MacOSX). Required when cross-compiling cImport-bearing modules to an Apple target.") orelse "";
 
+    // Android NDK sysroot — the Bionic libc + system headers needed
+    // when cross-compiling cImport-bearing modules to an Android
+    // target. Same shape as `apple_sdkroot`: Zig 0.16's bundled libc
+    // doesn't ship `sys/types.h` for the Android target, so erl_nif's
+    // cImport of erl_nif.h (which transitively includes Bionic
+    // headers via erl_drv_nif.h) fails with "'sys/types.h' not found".
+    // Set via `<ANDROID_HOME>/ndk/<vsn>/toolchains/llvm/prebuilt/<host>/sysroot`.
+    // Empty string = no injection — host or Apple builds don't need it.
+    const android_sdkroot = b.option([]const u8, "android_sdkroot", "Absolute path to an Android NDK sysroot (toolchains/llvm/prebuilt/<host>/sysroot). Required when cross-compiling cImport-bearing modules to an Android target.") orelse "";
+
     <%= for {name, _} <- @dependencies do %>
     const <%= name %> = b.dependency("<%= name %>", .{
         .target = resolved_target,
@@ -73,6 +83,16 @@ pub fn build(b: *std.Build) void {
             // need similar treatment if they hit the same issue.
             if (apple_sdkroot.len > 0) {
                 erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{apple_sdkroot}) });
+            }
+
+            // Same shape for Android. The NDK sysroot has Bionic libc
+            // headers at `usr/include/`; per-arch headers (e.g.
+            // `aarch64-linux-android/asm/types.h`) live one level
+            // deeper. Adding both is enough for erl_nif.h's transitive
+            // cImports to resolve.
+            if (android_sdkroot.len > 0) {
+                erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{android_sdkroot}) });
+                erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/aarch64-linux-android", .{android_sdkroot}) });
             }
 
             // Make build_options visible to nif_shim (which contains
