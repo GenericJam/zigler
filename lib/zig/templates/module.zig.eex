@@ -7,6 +7,31 @@ const root = @This();
 const threads = beam.threads;
 const builtin = @import("builtin");
 const build_options = @import("build_options");
+const std_ = @import("std");
+
+// Static-link builds (embedded BEAM, e.g. iOS) can't tolerate the
+// default panic handler — it pulls in `std.debug.SelfInfo` for
+// stack-trace resolution, which on Mach-O references dyld functions
+// like `_dyld_get_image_header_containing_address`. Those aren't
+// linkable in a static archive destined for an embedded BEAM that
+// doesn't ship its own dyld.
+//
+// When `nif_init_alias` is set (our marker for static-link mode),
+// swap to `std.debug.no_panic` — a trap-only panic that emits no
+// stdlib introspection. NIF-level errors still surface to BEAM via
+// the normal `erlang:error` path; only Zig-language `@panic` calls
+// trap silently.
+//
+// Host builds (no alias set) get `std.debug.simple_panic` — writes
+// the panic message to stderr then traps. Still avoids the full
+// SelfInfo backtrace machinery (which the BEAM stdout doesn't
+// surface usefully anyway), but the message is readable. Zig 0.16
+// removed `usingnamespace`, so this is the closest we can do to
+// a conditional decl at module scope.
+pub const panic = if (build_options.nif_init_alias.len > 0)
+    std_.debug.no_panic
+else
+    std_.debug.simple_panic;
 
 <%= for nif <- @nifs do %>
 <%= Nif.render_zig(nif) %>
