@@ -10,6 +10,31 @@ pub fn build(b: *std.Build) void {
 
     const mode = b.option(BuildMode, "zigler-mode", "Build either the nif library or the sema analysis module") orelse .nif_lib;
 
+    // `nif_linkage` controls whether the produced NIF is a dynamic
+    // library (default — what a host BEAM dlopens from priv/) or a
+    // static archive (.a — needed when linking the NIF into an
+    // embedded BEAM that doesn't have dlopen, e.g. iOS device).
+    // Static-linked NIFs also need the BEAM module name to match the
+    // static-NIF table entry; the caller is responsible for setting
+    // that up (e.g. via `-Dnif_init_name=<name>_nif_init` plumbing on
+    // the link side).
+    const nif_linkage = b.option(std.builtin.LinkMode, "nif_linkage", "NIF library linkage — dynamic (host) or static (embedded/iOS)") orelse .dynamic;
+
+    // For static-linked NIFs, BEAM's `erts_static_nif_tab[]` lookup
+    // matches a symbol named `<modname>_nif_init`. Zigler emits a bare
+    // `nif_init` (matches the dlopen path). When the consumer wants the
+    // static-table form, they pass `-Dnif_init_alias=<name>_nif_init`
+    // and we emit an additional `@export` aliasing nif_init under that
+    // name. The standard `nif_init` is always kept so the dlopen path
+    // also works. Empty string = no alias.
+    const nif_init_alias = b.option([]const u8, "nif_init_alias", "Additional exported symbol name for nif_init (for static-NIF table linking — e.g. `<name>_nif_init`)") orelse "";
+
+    // Thread nif_init_alias into module.zig via b.addOptions. The
+    // module conditionally emits an @export with this name in addition
+    // to the default `nif_init`. See module.zig.eex for the consumer.
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "nif_init_alias", nif_init_alias);
+
     <%= for {name, _} <- @dependencies do %>
     const <%= name %> = b.dependency("<%= name %>", .{
         .target = resolved_target,
@@ -27,9 +52,15 @@ pub fn build(b: *std.Build) void {
             <%= Builder.render_build(BuildModule.from_beam_module(assigns)) %>
             <%= Builder.render_build(BuildModule.nif_shim()) %>
 
+            // Make build_options visible to nif_shim (which contains
+            // module.zig's `export fn nif_init`). The shim conditionally
+            // emits an aliased @export when `nif_init_alias` is set —
+            // see module.zig for the consumer.
+            nif_shim.addImport("build_options", build_options.createModule());
+
             const lib = b.addLibrary(.{
                 .name = "<%= @module %>",
-                .linkage = .dynamic,
+                .linkage = nif_linkage,
                 .version = .{.major = <%= @version.major %>,
                              .minor = <%= @version.minor %>,
                              .patch = <%= @version.patch %>},
@@ -39,7 +70,13 @@ pub fn build(b: *std.Build) void {
             <%= render_c(@c, :lib) %>
             <%= for extra_module <- @extra_modules, do: render_c(extra_module, :lib) %>
 
-            lib.linker_allow_shlib_undefined = true;
+            // Static archives can't have unresolved symbols deferred to
+            // load-time (that's a shared-library concept). Skip the flag
+            // when the user requested a staticlib — the linker that
+            // eventually consumes the .a will resolve the `enif_*` etc.
+            if (nif_linkage == .dynamic) {
+                lib.linker_allow_shlib_undefined = true;
+            }
 
             // the native backend still causes segfaults, so we must disable it for now.
             lib.use_llvm = true;

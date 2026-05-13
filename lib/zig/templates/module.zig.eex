@@ -6,6 +6,7 @@ const Resource = beam.Resource;
 const root = @This();
 const threads = beam.threads;
 const builtin = @import("builtin");
+const build_options = @import("build_options");
 
 <%= for nif <- @nifs do %>
 <%= Nif.render_zig(nif) %>
@@ -74,6 +75,17 @@ export fn nif_init() *const e.ErlNifEntry {
     return &entry;
 }
 <% end %>
+
+// Static-NIF table lookup matches `<modname>_nif_init`. When the
+// consumer (e.g. an embedded BEAM on iOS) passes a non-empty
+// `-Dnif_init_alias=<name>` to `zig build`, emit an additional
+// `@export` aliasing `nif_init` under that name. The default
+// `nif_init` symbol is always kept so the dlopen path also works.
+comptime {
+    if (build_options.nif_init_alias.len > 0) {
+        @export(&nif_init, .{ .name = build_options.nif_init_alias });
+    }
+}
 
 fn sectionName() []const u8 {
     return switch (builtin.target.ofmt) {
