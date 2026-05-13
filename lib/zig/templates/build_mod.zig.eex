@@ -35,6 +35,15 @@ pub fn build(b: *std.Build) void {
     const build_options = b.addOptions();
     build_options.addOption([]const u8, "nif_init_alias", nif_init_alias);
 
+    // Apple SDK root for cross-compile to iOS/macOS/tvOS/watchOS.
+    // Zig's cImport-driven modules (`erl_nif`, anything using
+    // @cImport) need the Apple SDK's `sys/types.h` etc. — Zig's
+    // bundled libc headers don't cover Apple's Darwin extensions.
+    // Set via `xcrun --show-sdk-path -sdk iphoneos` (or
+    // iphonesimulator/macosx). Empty string = host build, no SDK
+    // injection — the host's default include path is fine.
+    const apple_sdkroot = b.option([]const u8, "apple_sdkroot", "Absolute path to an Apple SDK (iPhoneOS/iPhoneSimulator/MacOSX). Required when cross-compiling cImport-bearing modules to an Apple target.") orelse "";
+
     <%= for {name, _} <- @dependencies do %>
     const <%= name %> = b.dependency("<%= name %>", .{
         .target = resolved_target,
@@ -51,6 +60,20 @@ pub fn build(b: *std.Build) void {
             <%= for extra_module <- @extra_modules, do: Builder.render_build(extra_module)%>
             <%= Builder.render_build(BuildModule.from_beam_module(assigns)) %>
             <%= Builder.render_build(BuildModule.nif_shim()) %>
+
+            // When cross-compiling to an Apple target, Zig's libc headers
+            // don't cover Apple's Darwin extensions (sys/types.h etc.)
+            // that erl_nif.h transitively requires via cImport. Add the
+            // SDK's usr/include + System/Library/Frameworks to every
+            // module that touches Apple-specific cImports.
+            //
+            // We attach to `erl_nif` specifically because it's the only
+            // standard Zigler module that cImports a header pulling
+            // system types. extra_modules with their own cImports would
+            // need similar treatment if they hit the same issue.
+            if (apple_sdkroot.len > 0) {
+                erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{apple_sdkroot}) });
+            }
 
             // Make build_options visible to nif_shim (which contains
             // module.zig's `export fn nif_init`). The shim conditionally
