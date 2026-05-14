@@ -103,10 +103,24 @@ pub fn build(b: *std.Build) void {
             // `int foo[ N]` — plain C99 array param. Until Zig's
             // translate-c gains native support for the nullability
             // syntax on arrays, this lets the cImport chain through
-            // stdlib.h succeed on aarch64-linux-android.
+            // stdlib.h succeed on both aarch64-linux-android and
+            // armv7's arm-linux-androideabi.
             if (android_sdkroot.len > 0) {
+                // The per-arch header directory under the NDK sysroot
+                // differs per ABI:
+                //   arm64 (aarch64) -> aarch64-linux-android
+                //   armv7 (arm)     -> arm-linux-androideabi
+                // Pick from `resolved_target.result.cpu.arch` so each
+                // cross-compile gets the right Bionic per-arch
+                // headers (asm/types.h etc.) on its include path.
+                const android_arch_subdir = switch (resolved_target.result.cpu.arch) {
+                    .aarch64 => "aarch64-linux-android",
+                    .arm => "arm-linux-androideabi",
+                    else => @panic("zigler: unsupported Android target arch — only aarch64 and arm are wired today"),
+                };
+
                 erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{android_sdkroot}) });
-                erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/aarch64-linux-android", .{android_sdkroot}) });
+                erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/{s}", .{ android_sdkroot, android_arch_subdir }) });
                 erl_nif.addCMacro("_Nonnull", "");
                 erl_nif.addCMacro("_Nullable", "");
                 erl_nif.addCMacro("_Null_unspecified", "");
