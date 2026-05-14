@@ -90,9 +90,45 @@ pub fn build(b: *std.Build) void {
             // `aarch64-linux-android/asm/types.h`) live one level
             // deeper. Adding both is enough for erl_nif.h's transitive
             // cImports to resolve.
+            //
+            // Bionic's headers use Clang's nullability extension on
+            // array parameters — e.g. `unsigned short __xsubi[_Nonnull
+            // 3]` in stdlib.h. Zig 0.16's translate-c rejects that
+            // syntax with "nullability specifier cannot be applied to
+            // non-pointer type". Side-step it by overriding the
+            // nullability keywords with empty macros: the preprocessor
+            // expands `_Nonnull` and `_Nullable` to nothing before the
+            // lexer can interpret them as Clang's nullability
+            // keywords, so Bionic's `int foo[_Nonnull N]` becomes
+            // `int foo[ N]` — plain C99 array param. Until Zig's
+            // translate-c gains native support for the nullability
+            // syntax on arrays, this lets the cImport chain through
+            // stdlib.h succeed on aarch64-linux-android.
             if (android_sdkroot.len > 0) {
                 erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{android_sdkroot}) });
                 erl_nif.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/aarch64-linux-android", .{android_sdkroot}) });
+                erl_nif.addCMacro("_Nonnull", "");
+                erl_nif.addCMacro("_Nullable", "");
+                erl_nif.addCMacro("_Null_unspecified", "");
+            }
+
+            // Static-linkage build for a NIF archive that gets embedded
+            // into a shared library (Android `lib<app>.so`, iOS
+            // device's main binary). All modules must be PIC so the
+            // produced `.a`'s relocations are compatible with the
+            // eventual `-shared` link. Without this, ld.lld errors
+            // with "R_AARCH64_ABS64 cannot be used against local
+            // symbol; recompile with -fPIC" and TLS Local Exec
+            // relocations that aren't allowed in shared libraries.
+            // iOS arm64 is PIC by default in its ABI so this is
+            // strictly only needed for Android/Linux, but setting it
+            // unconditionally on static builds is harmless on iOS
+            // and keeps the code path simple.
+            if (nif_linkage == .static) {
+                erl_nif.pic = true;
+                beam.pic = true;
+                attributes.pic = true;
+                nif_shim.pic = true;
             }
 
             // Make build_options visible to nif_shim (which contains
