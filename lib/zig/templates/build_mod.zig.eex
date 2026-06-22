@@ -11,6 +11,40 @@ fn stripQuotes(path: []const u8) []const u8 {
     return path;
 }
 
+fn addTargetSdkIncludes(
+    b: *std.Build,
+    translate_c: *std.Build.Step.TranslateC,
+    target: std.Build.ResolvedTarget,
+    apple_sdkroot: []const u8,
+    android_sdkroot: []const u8,
+) void {
+    if (apple_sdkroot.len > 0) {
+        translate_c.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{apple_sdkroot}) });
+    }
+
+    if (android_sdkroot.len > 0) {
+        translate_c.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include", .{android_sdkroot}) });
+
+        const android_triple = switch (target.result.cpu.arch) {
+            .aarch64 => "aarch64-linux-android",
+            .arm => "arm-linux-androideabi",
+            .x86 => "i686-linux-android",
+            .x86_64 => "x86_64-linux-android",
+            else => "",
+        };
+
+        if (android_triple.len > 0) {
+            translate_c.addSystemIncludePath(.{ .cwd_relative = b.fmt("{s}/usr/include/{s}", .{ android_sdkroot, android_triple }) });
+        }
+
+        // Bionic annotates several declarations with nullability markers that
+        // Zig translate-c does not currently accept as C tokens.
+        translate_c.defineCMacro("_Nullable", "");
+        translate_c.defineCMacro("_Nonnull", "");
+        translate_c.defineCMacro("_Null_unspecified", "");
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const resolved_target = b.standardTargetOptions(<%=Zig.Target.for_builder()%>);
     // Host target for sema - must run on build machine during cross-compilation
@@ -27,6 +61,13 @@ pub fn build(b: *std.Build) void {
     const module_root = stripQuotes(b.option([]const u8, "module_root", "Path to module source directory") orelse @panic("module_root required"));
 
     const mode = b.option(BuildMode, "zigler-mode", "Build either the nif library or the sema analysis module") orelse .nif_lib;
+    const nif_linkage = b.option(std.builtin.LinkMode, "nif_linkage", "NIF library linkage: dynamic host library or static embedded archive") orelse .dynamic;
+    const nif_init_alias = stripQuotes(b.option([]const u8, "nif_init_alias", "Additional exported nif_init symbol for static NIF table linking") orelse "");
+    const apple_sdkroot = stripQuotes(b.option([]const u8, "apple_sdkroot", "Absolute path to an Apple SDK root for cross-compiling C imports") orelse "");
+    const android_sdkroot = stripQuotes(b.option([]const u8, "android_sdkroot", "Absolute path to the Android NDK sysroot for cross-compiling C imports") orelse "");
+
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "nif_init_alias", nif_init_alias);
 
     <%= for {name, _} <- @dependencies do %>
     const <%= name %> = b.dependency("<%= name %>", .{
@@ -50,6 +91,7 @@ pub fn build(b: *std.Build) void {
             });
             erl_translate_c.addSystemIncludePath(.{ .cwd_relative = erts_include });
             erl_translate_c.addSystemIncludePath(.{ .cwd_relative = erl_nif_win_path });
+            addTargetSdkIncludes(b, erl_translate_c, resolved_target, apple_sdkroot, android_sdkroot);
             const erl_module = erl_translate_c.createModule();
 
             <%= Builder.render_build(BuildModule.erl_nif()) %>
@@ -81,6 +123,7 @@ pub fn build(b: *std.Build) void {
                     .link_libc = true,
                 });
 <% end %>
+                addTargetSdkIncludes(b, translate_c_<%= module_name %>, resolved_target, apple_sdkroot, android_sdkroot);
 <%= for dir <- @c.include_dirs do %>
 <%= case dir do %>
 <% {:system, path} -> %>                translate_c_<%= module_name %>.addSystemIncludePath(.{ .cwd_relative = "<%= path %>" });
@@ -102,6 +145,7 @@ pub fn build(b: *std.Build) void {
                     .optimize = optimize,
                     .link_libc = true,
                 });
+                addTargetSdkIncludes(b, translate_c_easy_c, resolved_target, apple_sdkroot, android_sdkroot);
 <%= for dir <- (if @c, do: @c.include_dirs, else: []) do %>
 <%= case dir do %>
 <% {:system, path} -> %>                translate_c_easy_c.addSystemIncludePath(.{ .cwd_relative = "<%= path %>" });
@@ -113,9 +157,22 @@ pub fn build(b: *std.Build) void {
 <% end %>
             <%= Builder.render_build(BuildModule.nif_shim()) %>
 
+            if (nif_linkage == .static) {
+                erl_nif.pic = true;
+                beam.pic = true;
+                attributes.pic = true;
+<%= for extra_module <- @extra_modules do %>
+                <%= extra_module.name %>.pic = true;
+<% end %>
+                nif.pic = true;
+                nif_shim.pic = true;
+            }
+
+            nif_shim.addImport("build_options", build_options.createModule());
+
             const lib = b.addLibrary(.{
                 .name = "<%= @module %>",
-                .linkage = .dynamic,
+                .linkage = nif_linkage,
                 .version = .{.major = <%= @version.major %>,
                              .minor = <%= @version.minor %>,
                              .patch = <%= @version.patch %>},
@@ -125,7 +182,9 @@ pub fn build(b: *std.Build) void {
             <%= render_c(@c, :lib) %>
             <%= for extra_module <- @extra_modules, do: render_c(extra_module, :lib) %>
 
-            lib.linker_allow_shlib_undefined = true;
+            if (nif_linkage == .dynamic) {
+                lib.linker_allow_shlib_undefined = true;
+            }
 
             // Only for 32-bit x86 targets
             if (resolved_target.result.cpu.arch == .x86) {

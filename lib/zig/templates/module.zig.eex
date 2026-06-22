@@ -1,11 +1,15 @@
 const beam = @import("beam");
 const e = @import("erl_nif");
 const nif = @import("nif");
-const Allocator = @import("std").mem.Allocator;
+const std = @import("std");
+const build_options = @import("build_options");
+const Allocator = std.mem.Allocator;
 const Resource = beam.Resource;
 const root = @This();
 const threads = beam.threads;
 const builtin = @import("builtin");
+
+pub const panic = if (build_options.nif_init_alias.len > 0) std.debug.no_panic else std.debug.simple_panic;
 
 <%= for nif <- @nifs do %>
 <%= Nif.render_zig(nif) %>
@@ -73,6 +77,12 @@ export fn nif_init() *const e.ErlNifEntry {
     return &entry;
 }
 <% end %>
+
+comptime {
+    if (build_options.nif_init_alias.len > 0) {
+        @export(&nif_init, .{ .name = build_options.nif_init_alias });
+    }
+}
 
 fn sectionName() []const u8 {
     return switch (builtin.target.ofmt) {
